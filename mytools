@@ -5,6 +5,100 @@ import sys
 VERSION = "0.1.0"
 
 
+class BedError(Exception):
+    """A malformed-input error, carrying the exit code it should produce."""
+
+    def __init__(self, message, exit_code=1):
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+def parse_bed_lines(lines, source_name):
+    """Parse an iterable of raw BED lines into (chrom, start, line) records.
+
+    `line` has any trailing newline stripped but is otherwise verbatim, so
+    callers can print it back out unchanged. Blank lines and track/browser/#
+    header lines are skipped, matching bedtools' own behaviour for them.
+    """
+    records = []
+    for lineno, raw in enumerate(lines, start=1):
+        line = raw.rstrip("\n")
+        if line == "":
+            continue
+        if line.startswith("#") or line.startswith("track") or line.startswith("browser"):
+            continue
+
+        fields = line.split("\t")
+        if len(fields) < 3:
+            raise BedError(
+                f"mytools: sort: {source_name}:{lineno}: expected at least 3 "
+                "tab-separated columns"
+            )
+
+        chrom, start_s, end_s = fields[0], fields[1], fields[2]
+        if not start_s.isdigit() or not end_s.isdigit():
+            raise BedError(
+                f"mytools: sort: {source_name}:{lineno}: start/end must be "
+                "non-negative integers"
+            )
+
+        start, end = int(start_s), int(end_s)
+        if start > end:
+            raise BedError(
+                f"mytools: sort: {source_name}:{lineno}: start ({start}) is "
+                f"greater than end ({end})"
+            )
+
+        records.append((chrom, start, line))
+    return records
+
+
+def sort_records(records):
+    # Chrom lexicographic, then start numeric -- equivalent to sort -k1,1 -k2,2n.
+    # Python's sort is stable, matching bedtools' own tie-break behaviour of
+    # preserving input order when chrom and start are both equal.
+    return sorted(records, key=lambda r: (r[0], r[1]))
+
+
+def cmd_sort(args):
+    path = None
+    for arg in args:
+        if arg != "-" and arg.startswith("-"):
+            print("usage: mytools sort [<file>|-]", file=sys.stderr)
+            print(f"mytools: sort: unrecognized option: {arg}", file=sys.stderr)
+            return 2
+        if path is not None:
+            print("usage: mytools sort [<file>|-]", file=sys.stderr)
+            print("mytools: sort: too many arguments", file=sys.stderr)
+            return 2
+        path = arg
+
+    use_stdin = path is None or path == "-"
+    source_name = "stdin" if use_stdin else path
+
+    if use_stdin:
+        handle = sys.stdin
+    else:
+        try:
+            handle = open(path, "r")
+        except OSError as e:
+            print(f"mytools: cannot open {path}: {e.strerror}", file=sys.stderr)
+            return 1
+
+    try:
+        records = parse_bed_lines(handle, source_name)
+    except BedError as e:
+        print(str(e), file=sys.stderr)
+        return e.exit_code
+    finally:
+        if handle is not sys.stdin:
+            handle.close()
+
+    for _, _, line in sort_records(records):
+        sys.stdout.write(line + "\n")
+    return 0
+
+
 def main(argv):
     if not argv:
         print("usage: mytools <command> [options]", file=sys.stderr)
@@ -13,6 +107,9 @@ def main(argv):
     if argv[0] == "--version":
         print(f"mytools {VERSION}")
         return 0
+
+    if argv[0] == "sort":
+        return cmd_sort(argv[1:])
 
     print("usage: mytools <command> [options]", file=sys.stderr)
     return 2
